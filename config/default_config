@@ -1,5 +1,5 @@
 [general]
-bars = 64  # Adjust based on your OLED width
+bars = 36  # Adjust based on your OLED width
 
 lower_cutoff_freq = 30
 higher_cutoff_freq = 20000
