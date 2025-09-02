@@ -5,7 +5,7 @@ CAVA [![Build Status](https://github.com/karlstav/cava/workflows/build-and-test/
 
 by [Karl Stavestrand](mailto:karl@stavestrand.no)
 
-<a href='https://play.google.com/store/apps/details?id=com.karlstav.cava&pcampaignid=pcampaignidMKT-Other-global-all-co-prtnr-py-PartBadge-Mar2515-1'><img alt='Get it on Google Play' src='https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png' width="200"/></a>
+Now also supports [dumb terminals](https://github.com/karlstav/cava/blob/master/TERMINAL.md)!
 
 ![spectrum](https://github.com/karlstav/cava/blob/master/example_files/cava.gif "spectrum")
 
@@ -212,13 +212,13 @@ running:
 
 #### Arch
 
-Cava is in [AUR](https://aur.archlinux.org/packages/cava/).
+Cava is available in Arch Linux official repo:
 
-    pacaur -S cava
+    pacman -S cava
 
 #### Ubuntu/Debian
 
-##### Ubuntu 20.10 or more recent / Debian (unstable)
+##### Ubuntu 20.10 or more recent / Debian 12 (Bookworm)
 
     sudo apt install cava
     
@@ -241,22 +241,13 @@ cava is in homebrew.
 Capturing audio
 ---------------
 
-### Pulseaudio
-
-Just make sure you have installed pulseaudio dev files and that cava has been built with pulseaudio support (it should be automatically if the dev files are found).
-
-If you're lucky all you have to do is to run cava.
- 
-If nothing happens you might have to use a different source than the default. The default might also be your microphone. Look at the [config](#configuration) file for help. 
-
+All config options are set in the [config file](#configuration).
 
 ### Pipewire
 
-Set
-
     method = pipewire
 
-The default source is `auto` and will most likely be your currently selected output.
+This is the default input method if supported on your system. The default source is `auto` and will most likely be your currently selected output.
 If you run wireplumber you can use `wpctl` to get the `object.path` or `object.serial` of the desired device to visualize.
 
 e.g.
@@ -264,13 +255,19 @@ e.g.
     source = alsa:pcm:3:front:3:playback
 
 
-### ALSA
+### Pulseaudio
 
-Set
+    method = pulse
+
+The default source is `auto` and should be your currently selected output.
+ 
+If nothing happens you might have to use a different source than the default. The default might also be your microphone.
+
+
+### ALSA
 
     method = alsa
 
-in the [config](#configuration) file.
 
 ALSA can be difficult because there is no native way to grab audio from an output. If you want to capture audio straight fom the output (not just mic or line-in), you must create an ALSA loopback interface, then output the audio simultaneously to both the loopback and your normal interface.
 
@@ -324,8 +321,6 @@ I had some trouble with sync (the visualizer was ahead of the sound). Reducing t
     }
 
 ### Sndio
-
-Set
 
     method = sndio
 
@@ -389,8 +384,6 @@ server.
 
 ### OSS
 
-Set
-
     method = oss
 
 The audio system used on FreeBSD is the Open Sound System (OSS).
@@ -447,8 +440,6 @@ to use the `/dev/dsp.cava` device. For programs where this is not possible, e.g.
 replace `-l dsp.cava` with `-l dsp`. Virtual OSS can be configured and started as a service on FreeBSD.
 
 ### JACK
-
-Set
 
     method = jack
 
@@ -540,16 +531,26 @@ where `AA:BB:CC:DD:EE:FF` is squeezelite's MAC address (check the LMS Web GUI (S
 Note: squeezelite must be started with the `-v` flag to enable visualizer support.
 
 ### macOS
+```
+method = portaudio
+```
 
-Note: Cava doesn't render correctly within the default macOS terminal. In order to achieve an optimal display, install [Kitty](https://sw.kovidgoyal.net/kitty/index.html). Beware that you may run in to the issue presented in #109; however, it can be resolved with [this](https://stackoverflow.com/questions/7165108/in-os-x-lion-lang-is-not-set-to-utf-8-how-to-fix-it).
+Portaudio is the default and only supported way of capturing audio on macOS. Unfortunately portaudio can not capture audio directly from the output, but there are severeal ways to achive this: 
 
 **Background Music**
 
 Install [Background Music](https://github.com/kyleneideck/BackgroundMusic) which provides a loopback interface automatically. Once installed and running just edit your [config](#configuration) to use this interface with portaudio:
 
 ```
-method = portaudio
 source = "Background Music"
+```
+
+**BlackHole**
+
+Install [BlackHole](https://github.com/ExistentialAudio/BlackHole) and create a [Multi Output Device](https://github.com/ExistentialAudio/BlackHole/wiki/Multi-Output-Device), making sure you have your speaker as the first output device in the list, and BlackHole as second (check the ⚠️ note under [4. Select Output Devices](https://github.com/ExistentialAudio/BlackHole/wiki/Multi-Output-Device#4-select-output-devices) on the linked wiki page). Once installed and running just edit your [config](#configuration) to use this interface with portaudio (changing `2ch` to `16ch` or `64ch` if you're using those):
+
+```
+source = "BlackHole 2ch"
 ```
 
 **Sound Flower**
@@ -563,9 +564,14 @@ method = portaudio
 source = "Soundflower (2ch)"
 ```
 
+
+
+Note: Cava doesn't render correctly within the default macOS terminal. In order to achieve an optimal display, install [Kitty](https://sw.kovidgoyal.net/kitty/index.html). Beware that you may run in to the issue presented in #109; however, it can be resolved with [this](https://stackoverflow.com/questions/7165108/in-os-x-lion-lang-is-not-set-to-utf-8-how-to-fix-it).
+
+
 ### Windows
 
-Should capture the audio from the default output device automatically.
+Should capture the audio from the default output device automatically. No config needed.
 
 
 Running via ssh
@@ -585,6 +591,10 @@ exit with ctrl+z then run 'bg' to keep it running after you log out.
 ### No bars in terminal
 
 Most likley issue [#399](https://github.com/karlstav/cava/issues/399). Locale settings need to be set correctly in order for cava to work.
+
+### Bars not moving
+
+Read the chapter on [capturing audio](#capturing-audio). Depending on your system this might not work automatically. For example if you have pipewire dev files on your system, but are still using pulseaudio, you will have to specify `pulse` as your input method in the cava config file.
 
 ### Visualizer reacts to microphone instead of output
 
@@ -614,7 +624,7 @@ Actually, `setfont` is supposed to return the default font, but this usually isn
 
 ### Gradient not working in Konsole
 
-Konsole simply does not support this. #194
+Konsole simply does not support this. [#194](https://github.com/karlstav/cava/issues/194)
 
 Usage
 -----
@@ -645,8 +655,6 @@ If cava quits unexpectedly or is force killed, echo must be turned on manually w
 
 Configuration
 -------------
-
-As of version 0.4.0 all options are done in the config file, no more command-line arguments!
 
 By default a configuration file is created upon first launch in `$XDG_CONFIG_HOME/cava/config` or `$HOME/.config/cava/config`, but cava can also be made to use a different file with the `-p` option.
 
@@ -695,6 +703,8 @@ You can also use Cava's output for other programs by using raw output mode, whic
 
 A useful starting point example script written in python that consumes raw data can be found [here](https://github.com/karlstav/cava/issues/123#issuecomment-307891020).
 
+### [cava2sse](https://codeberg.org/dnalor/cava2sse)
+is a stand-alone component for making Cava's raw values available as [server-sent events](https://en.wikipedia.org/wiki/Server-sent_events). With this, any application can use CAVA's output data over the network.
 
 Contribution
 ------

@@ -23,4 +23,9 @@ missing
 version
 config_file.h
 .*
+*.user
 cava
+build/*
+cava_win/packages/*
+cava_win/x64/*
+yasb/*

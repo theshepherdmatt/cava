@@ -49,7 +49,7 @@
 #define HAS_JACK false
 #endif
 
-#ifdef _MSC_VER
+#ifdef _WIN32
 #define HAS_WINSCAP true
 #define SDL true
 #define HAS_FIFO false
@@ -103,12 +103,12 @@ enum orientation {
 };
 
 struct config_params {
-    char *color, *bcolor, *raw_target, *audio_source,
-        /**gradient_color_1, *gradient_color_2,*/ **gradient_colors, *data_format, *vertex_shader,
-        *fragment_shader;
+    char *color, *bcolor, *raw_target, *audio_source, **gradient_colors,
+        **horizontal_gradient_colors, *data_format, *vertex_shader, *fragment_shader, *theme;
 
     char bar_delim, frame_delim;
-    double monstercat, integral, gravity, ignore, sens, noise_reduction;
+    double monstercat, integral, gravity, ignore, sens, noise_reduction, max_height;
+
     unsigned int lower_cut_off, upper_cut_off;
     double *userEQ;
     enum input_method input;
@@ -116,12 +116,14 @@ struct config_params {
     enum xaxis_scale xaxis;
     enum mono_option mono_opt;
     enum orientation orientation;
+    enum orientation blendDirection;
     int userEQ_keys, userEQ_enabled, col, bgcol, autobars, stereo, raw_format, ascii_range,
-        bit_format, gradient, gradient_count, fixedbars, framerate, bar_width, bar_spacing,
-        bar_height, autosens, overshoot, waves, samplerate, samplebits, channels, autoconnect,
-        sleep_timer, sdl_width, sdl_height, sdl_x, sdl_y, sdl_full_screen, draw_and_quit, zero_test,
+        bit_format, gradient, gradient_count, horizontal_gradient, horizontal_gradient_count,
+        fixedbars, framerate, bar_width, bar_spacing, bar_height, autosens, overshoot, waves,
+        active, remix, virtual, samplerate, samplebits, channels, autoconnect, sleep_timer,
+        sdl_width, sdl_height, sdl_x, sdl_y, sdl_full_screen, draw_and_quit, zero_test,
         non_zero_test, reverse, sync_updates, continuous_rendering, disable_blanking,
-        show_idle_bar_heads, waveform;
+        show_idle_bar_heads, waveform, center_align;
 };
 
 struct error_s {
@@ -130,4 +132,4 @@ struct error_s {
 };
 
 bool load_config(char configPath[PATH_MAX], struct config_params *p, bool colorsOnly,
-                 struct error_s *error);
+                 struct error_s *error, int reload);

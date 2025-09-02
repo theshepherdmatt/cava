@@ -16,7 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#ifndef _MSC_VER
+#ifndef _WIN32
 #include <ctype.h>
 #include <dirent.h>
 #include <getopt.h>
@@ -25,13 +25,14 @@
 #include <unistd.h>
 #endif
 
-#ifdef _MSC_VER
+#ifdef _WIN32
 #include "input/winscap.h"
 #include <windows.h>
 #define PATH_MAX 260
 #define PACKAGE "cava"
+#define VERSION "0.10.4"
 #define _CRT_SECURE_NO_WARNINGS 1
-#endif // _MSC_VER
+#endif // _WIN32
 
 #include <signal.h>
 #include <string.h>
@@ -56,17 +57,16 @@
 
 #include "input/common.h"
 
+#include "output/noritake.h"
+#include "output/raw.h"
 #include "output/terminal_noncurses.h"
 
-#ifndef _MSC_VER
+#ifndef _WIN32
 #ifdef NCURSES
 #include "output/terminal_bcircle.h"
 #include "output/terminal_ncurses.h"
 #include <curses.h>
 #endif
-
-#include "output/noritake.h"
-#include "output/raw.h"
 
 #include "input/alsa.h"
 #include "input/fifo.h"
@@ -87,6 +87,33 @@
 #define GCC_UNUSED /* nothing */
 #endif
 
+#ifdef _WIN32
+char *optarg = NULL;
+int optind = 1;
+
+static int getopt(int argc, char *const argv[], const char *optstring) {
+    if ((optind >= argc) || (argv[optind][0] != '-') || (argv[optind][0] == 0)) {
+        return -1;
+    }
+
+    int opt = argv[optind][1];
+    const char *p = strchr(optstring, opt);
+
+    if (p == NULL) {
+        return '?';
+    }
+    if (p[1] == ':') {
+        optind++;
+        if (optind >= argc) {
+            return '?';
+        }
+        optarg = argv[optind];
+        optind++;
+    }
+    return opt;
+}
+#endif
+
 // used by sig handler
 // needs to know output mode in order to clean up terminal
 int output_mode;
@@ -96,6 +123,7 @@ int should_reload = 0;
 int reload_colors = 0;
 // whether we should quit
 int should_quit = 0;
+int signal_received = 0;
 
 // these variables are used only in main, but making them global
 // will allow us to not free them on exit without ASan complaining
@@ -127,8 +155,12 @@ void cleanup(void) {
 }
 
 // general: handle signals
+#ifdef _WIN32
+int sig_handler(DWORD sig_no) {
+#else
 void sig_handler(int sig_no) {
-#ifndef _MSC_VER
+#endif
+#ifndef _WIN32
 
     if (sig_no == SIGUSR1) {
         should_reload = 1;
@@ -141,21 +173,23 @@ void sig_handler(int sig_no) {
     }
 #endif
 
-    cleanup();
-
-#ifdef _MSC_VER
+#ifdef _WIN32
     if (sig_no == CTRL_C_EVENT || sig_no == CTRL_CLOSE_EVENT) {
         sig_no = SIGINT;
     } else {
-        return;
+        return TRUE;
     }
 #endif
-    if (sig_no == SIGINT) {
-        printf("CTRL-C pressed -- goodbye\n");
+    if (sig_no == SIGINT || sig_no == SIGTERM) {
+        should_reload = 1;
+        should_quit = 1;
     }
 
-    signal(sig_no, SIG_DFL);
-    raise(sig_no);
+    signal_received = sig_no;
+
+#ifdef _WIN32
+    return TRUE;
+#endif
 }
 
 #ifdef ALSA
@@ -219,15 +253,15 @@ float *monstercat_filter(float *bars, int number_of_bars, int waves, double mons
 // general: entry point
 int main(int argc, char **argv) {
 
-#ifndef _MSC_VER
+#ifndef _WIN32
     // general: console title
     printf("%c]0;%s%c", '\033', PACKAGE, '\007');
-#endif // !_MSC_VER
+#endif // !_WIN32
 
     // general: handle command-line arguments
     char configPath[PATH_MAX];
     configPath[0] = '\0';
-#ifdef _MSC_VER
+#ifdef _WIN32
     if (!SetConsoleCtrlHandler(sig_handler, TRUE)) {
         fprintf(stderr, "ERROR: Could not set control handler");
         exit(EXIT_FAILURE);
@@ -259,15 +293,13 @@ Keys:\n\
         c         Reload colors only\n\
         f         Cycle foreground color\n\
         b         Cycle background color\n\
+        o         Change orientation bottom -> right -> top -> left (ncurses), top <-> bottom (other modes)\n\
         q         Quit\n\
-\n\
-as of 0.4.0 all options are specified in config file, see in '/home/username/.config/cava/' \n";
-#ifndef _MSC_VER
-
+\n";
     int c;
     while ((c = getopt(argc, argv, "p:vh")) != -1) {
         switch (c) {
-        case 'p': // argument: fifo path
+        case 'p': // argument: config path
             snprintf(configPath, sizeof(configPath), "%s", optarg);
             break;
         case 'h': // argument: print usage
@@ -283,10 +315,7 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
             abort();
         }
     }
-#else
-    if (argc > 1)
-        snprintf(configPath, sizeof(configPath), "%s", argv[1]);
-#endif
+    int reload = 0;
 
     // general: main loop
     while (1) {
@@ -295,48 +324,73 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
         // config: load
         struct error_s error;
         error.length = 0;
-        if (!load_config(configPath, &p, 0, &error)) {
+        if (!load_config(configPath, &p, 0, &error, reload)) {
             fprintf(stderr, "Error loading config. %s", error.message);
             exit(EXIT_FAILURE);
         }
 
         int inAtty = 0;
+        int inAterminal = 0;
 
         output_mode = p.output;
-#ifndef _MSC_VER
+#ifndef _WIN32
         if (output_mode == OUTPUT_NCURSES || output_mode == OUTPUT_NONCURSES) {
             // Check if we're running in a tty
-            if (strncmp(ttyname(0), "/dev/tty", 8) == 0 || strcmp(ttyname(0), "/dev/console") == 0)
+            if (strncmp(ttyname(0), "/dev/tty", 8) == 0 ||
+                strcmp(ttyname(0), "/dev/console") == 0 ||
+                strncmp(ttyname(0), "/dev/ttyS", 9) == 0 ||
+                strncmp(ttyname(0), "/dev/ttyUSB", 11) == 0)
                 inAtty = 1;
+
+            // Check if we are running in a dumb terminal
+            if (strncmp(ttyname(0), "/dev/ttyS", 9) == 0 ||
+                strncmp(ttyname(0), "/dev/ttyUSB", 11) == 0)
+                inAterminal = 1;
 
             // in macos vitual terminals are called ttys(xyz) and there are no ttys
             if (strncmp(ttyname(0), "/dev/ttys", 9) == 0)
                 inAtty = 0;
+
             if (inAtty) {
-#ifdef CAVAFONT
-                // checking if cava psf font is installed in FONTDIR
-                FILE *font_file;
-                font_file = fopen(FONTDIR "/" FONTFILE, "r");
-                if (font_file) {
-                    fclose(font_file);
-#ifdef __FreeBSD__
-                    system("vidcontrol -f " FONTDIR "/" FONTFILE " >/dev/null 2>&1");
-#else
-                    system("setfont " FONTDIR "/" FONTFILE " >/dev/null 2>&1");
-#endif
+                if (inAterminal) {
+                    printf("\033P 1;32;1;0;0;2 { sp @ "
+                           "\?\?\?\?\?\?\?\?/GGGGGGGG;"
+                           "\?\?\?\?\?\?\?\?/GGGGGGGG;"
+                           "\?\?\?\?\?\?\?\?/KKKKKKKK;"
+                           "\?\?\?\?\?\?\?\?/MMMMMMMM;"
+                           "\?\?\?\?\?\?\?\?/NNNNNNNN;"
+                           "oooooooo/NNNNNNNN;"
+                           "wwwwwwww/NNNNNNNN;"
+                           "}}}}}}}}/NNNNNNNN;"
+                           "~~~~~~~~/NNNNNNNN");
+
+                    printf("\033( sp @ ");
                 } else {
-                    // if not it might still be available, we dont know, must try
+#ifdef CAVAFONT
+                    // checking if cava psf font is installed in FONTDIR
+                    FILE *font_file;
+                    font_file = fopen(FONTDIR "/" FONTFILE, "r");
+                    if (font_file) {
+                        fclose(font_file);
 #ifdef __FreeBSD__
-                    system("vidcontrol -f " FONTFILE " >/dev/null 2>&1");
+                        system("vidcontrol -f " FONTDIR "/" FONTFILE " >/dev/null 2>&1");
 #else
-                    system("setfont " FONTFILE " >/dev/null 2>&1");
+                        system("setfont " FONTDIR "/" FONTFILE " >/dev/null 2>&1");
 #endif
-                }
+                    } else {
+                        // if not it might still be available, we dont know, must try
+#ifdef __FreeBSD__
+                        system("vidcontrol -f " FONTFILE " >/dev/null 2>&1");
+#else
+                        system("setfont " FONTFILE " >/dev/null 2>&1");
+#endif
+                    }
 #endif // CAVAFONT
 #ifndef __FreeBSD__
-                if (p.disable_blanking)
-                    system("setterm -blank 0");
+                    if (p.disable_blanking)
+                        system("setterm -blank 0");
 #endif
+                }
                 if (p.orientation != ORIENT_BOTTOM) {
                     cleanup();
                     fprintf(stderr, "only default bottom orientation is supported in tty\n");
@@ -375,7 +429,8 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
         audio.autoconnect = 0;
 
         audio.input_buffer_size = BUFFER_SIZE * audio.channels;
-        audio.cava_buffer_size = audio.input_buffer_size * 8;
+        audio.cava_buffer_size = 16384; // this is the size at rates of 44100 or 48k, will be
+                                        // adjusted later if sample rate is unusual
 
         audio.cava_in = (double *)malloc(audio.cava_buffer_size * sizeof(double));
         memset(audio.cava_in, 0, sizeof(int) * audio.cava_buffer_size);
@@ -395,7 +450,7 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
         pthread_mutex_init(&audio.lock, NULL);
 
         switch (p.input) {
-#ifndef _MSC_VER
+#ifndef _WIN32
 
 #ifdef ALSA
         case INPUT_ALSA:
@@ -476,11 +531,15 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
         case INPUT_PIPEWIRE:
             audio.format = p.samplebits;
             audio.rate = p.samplerate;
+            audio.channels = p.channels;
+            audio.active = p.active;
+            audio.remix = p.remix;
+            audio.virtual = p.virtual;
             thr_id = pthread_create(&p_thread, NULL, input_pipewire, (void *)&audio);
             break;
 #endif
 #endif
-#ifdef _MSC_VER
+#ifdef _WIN32
         case INPUT_WINSCAP:
             thr_id = pthread_create(&p_thread, NULL, input_winscap, (void *)&audio);
             break;
@@ -491,7 +550,7 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
 
         timeout_counter = 0;
         while (true) {
-#ifdef _MSC_VER
+#ifdef _WIN32
             Sleep(1);
 #else
             nanosleep(&timeout_timer, NULL);
@@ -516,9 +575,20 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
 
         if (p.upper_cut_off > audio.rate / 2) {
             cleanup();
-            fprintf(stderr, "higher cutoff frequency can't be higher than sample rate / 2");
+            fprintf(stderr,
+                    "higher cutoff frequency can't be higher than sample rate / 2\nhigher "
+                    "cutoff frequency is set to: %d, got sample rate: %d\n",
+                    p.upper_cut_off, audio.rate);
             exit(EXIT_FAILURE);
         }
+
+        // force stereo if only one channel is available
+        if (p.stereo && audio_channels == 1)
+            p.stereo = 0;
+
+        int output_channels = 1;
+        if (p.stereo)
+            output_channels = 2;
 
         int *bars;
         int *previous_frame;
@@ -526,9 +596,13 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
         float *bars_left, *bars_right;
         double *cava_out;
         float *bars_raw;
+        float *previous_bars_raw;
 
         int height, lines, width, remainder, fp;
         int *dimension_bar, *dimension_value;
+#ifdef _WIN32
+        HANDLE hFile = NULL;
+#endif
 
         if (p.orientation == ORIENT_LEFT || p.orientation == ORIENT_RIGHT) {
             dimension_bar = &height;
@@ -596,16 +670,12 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
                 if (p.xaxis != NONE)
                     lines--;
 
-                init_terminal_noncurses(inAtty, p.color, p.bcolor, p.col, p.bgcol, p.gradient,
-                                        p.gradient_count, p.gradient_colors, width, lines,
-                                        p.bar_width, p.orientation);
-                height = lines * 8;
+                height = lines * 8 * p.max_height;
                 break;
-#ifndef _MSC_VER
             case OUTPUT_RAW:
             case OUTPUT_NORITAKE:
                 if (strcmp(p.raw_target, "/dev/stdout") != 0) {
-
+#ifndef _WIN32
                     int fptest;
                     // checking if file exists
                     if (access(p.raw_target, F_OK) != -1) {
@@ -626,10 +696,32 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
                         fptest = open(p.raw_target, O_RDONLY | O_NONBLOCK, 0644);
                     }
                     fp = open(p.raw_target, O_WRONLY | O_NONBLOCK | O_CREAT, 0644);
+#else
+                    int pipeLength = strlen("\\\\.\\pipe\\") + strlen(p.raw_target) + 1;
+                    char *pipePath = malloc(pipeLength);
+                    pipePath[pipeLength - 1] = '\0';
+                    strcat(pipePath, "\\\\.\\pipe\\");
+                    strcat(pipePath, p.raw_target);
+                    DWORD pipeMode = strcmp(p.data_format, "ascii")
+                                         ? PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE
+                                         : PIPE_TYPE_BYTE | PIPE_READMODE_BYTE;
+                    hFile = CreateNamedPipeA(pipePath, PIPE_ACCESS_OUTBOUND | FILE_FLAG_OVERLAPPED,
+                                             pipeMode | PIPE_NOWAIT, PIPE_UNLIMITED_INSTANCES, 0, 0,
+                                             NMPWAIT_USE_DEFAULT_WAIT, NULL);
+                    free(pipePath);
+#endif
                 } else {
+#ifndef _WIN32
                     fp = fileno(stdout);
+#else
+                    hFile = GetStdHandle(STD_OUTPUT_HANDLE);
+#endif
                 }
+#ifndef _WIN32
                 if (fp == -1) {
+#else
+                if (hFile == INVALID_HANDLE_VALUE) {
+#endif
                     fprintf(stderr, "could not open file %s for writing\n", p.raw_target);
                     exit(1);
                 }
@@ -638,11 +730,11 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
                 debug("open file %s for writing raw output\n", p.raw_target);
 #endif
 
-                // width must be hardcoded for raw output.
-                width = 512;
-
-                p.bar_width = 1; // not used
-                p.bar_spacing = 1;
+                // width must be hardcoded for raw output. only used to calculate the number of
+                // bars in auto mode
+                width = 512 * output_channels;
+                p.bar_width = 1;
+                p.bar_spacing = 0;
 
                 if (strcmp(p.data_format, "ascii") != 0) {
                     // "binary" or "noritake"
@@ -651,53 +743,79 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
                     height = p.ascii_range;
                 }
                 break;
-#endif
             default:
                 exit(EXIT_FAILURE); // Can't happen.
             }
 
-            // force stereo if only one channel is available
-            if (p.stereo && audio_channels == 1)
-                p.stereo = 0;
-
+            // getting numbers of bars
+            int number_of_bars = -1;
             // handle for user setting too many bars
             if (p.fixedbars) {
-                p.autobars = 0;
-                if (p.fixedbars * p.bar_width + p.fixedbars * p.bar_spacing - p.bar_spacing > width)
-                    p.autobars = 1;
-            }
-
-            // getting numbers of bars
-            int number_of_bars = p.fixedbars;
-
-            if (p.autobars == 1)
+                number_of_bars = p.fixedbars;
+                if (number_of_bars * p.bar_width + p.fixedbars * p.bar_spacing - p.bar_spacing >
+                    width) {
+                    cleanup();
+                    fprintf(stderr, "window is too narrow for number of bars set, maximum is %d\n",
+                            (width - p.bar_spacing) / (p.bar_width + p.bar_spacing));
+                    audio.terminate = 1;
+                    exit(EXIT_FAILURE);
+                }
+                if (number_of_bars <= 1) {
+                    cleanup();
+                    fprintf(stderr, "fixed number of bars must be at least 1\n");
+                    exit(EXIT_FAILURE);
+                }
+                if (output_channels == 2 && number_of_bars % 2 != 0) {
+                    cleanup();
+                    fprintf(stderr, "must have even number of bars with stereo output\n");
+                    exit(EXIT_FAILURE);
+                }
+            } else {
                 number_of_bars = (*dimension_bar + p.bar_spacing) / (p.bar_width + p.bar_spacing);
 
-            if (number_of_bars <= 1) {
-                number_of_bars = 1; // must have at least 1 bars
-                if (p.stereo) {
-                    number_of_bars = 2; // stereo have at least 2 bars
+                if (output_mode == OUTPUT_SDL_GLSL) {
+                    if (number_of_bars > 512)
+                        number_of_bars = 512; // cant have more than 512 bars in glsl due to shader
+                                              // program implementation limitations
+                } else {
+                    if (number_of_bars / output_channels > 512)
+                        number_of_bars = 512 * output_channels; // cant have more than 512 bars on
+                                                                // 44100 rate per channel
                 }
-            }
-            if (number_of_bars > 512)
-                number_of_bars = 512; // cant have more than 512 bars on 44100 rate
 
-            int output_channels = 1;
-            if (p.stereo) { // stereo must have even numbers of bars
-                output_channels = 2;
-                if (number_of_bars % 2 != 0)
-                    number_of_bars--;
+                if (number_of_bars <= 1) {
+                    number_of_bars = 1; // must have at least 1 bars
+                    if (p.stereo) {
+                        number_of_bars = 2; // stereo have at least 2 bars
+                    }
+                }
+                if (output_channels == 2 && number_of_bars % 2 != 0)
+                    number_of_bars--; // stereo must have even numbers of bars
             }
+
             int raw_number_of_bars = (number_of_bars / output_channels) * audio_channels;
             if (p.waveform) {
                 raw_number_of_bars = number_of_bars;
             }
+
             // checks if there is stil extra room, will use this to center
-            remainder = (*dimension_bar - number_of_bars * p.bar_width -
-                         number_of_bars * p.bar_spacing + p.bar_spacing) /
-                        2;
-            if (remainder < 0)
+            if (p.center_align) {
+                remainder = (*dimension_bar - number_of_bars * p.bar_width -
+                             number_of_bars * p.bar_spacing + p.bar_spacing) /
+                            2;
+                if (remainder < 0)
+                    remainder = 0;
+            } else {
                 remainder = 0;
+            }
+
+            if (output_mode == OUTPUT_NONCURSES) {
+                init_terminal_noncurses(inAtty, p.color, p.bcolor, p.col, p.bgcol, p.gradient,
+                                        p.gradient_count, p.gradient_colors, p.horizontal_gradient,
+                                        p.horizontal_gradient_count, p.horizontal_gradient_colors,
+                                        number_of_bars, width, lines, p.bar_width, p.orientation,
+                                        p.blendDirection);
+            }
 
 #ifndef NDEBUG
             debug("height: %d width: %d dimension_bar: %d dimension_value: %d bars:%d bar width: "
@@ -723,6 +841,17 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
                 exit(EXIT_FAILURE);
             }
 
+            // if the sample rate is unusual high or low, we need to adjust the input buffer size
+            // after the audio thread has started
+            if (plan->input_buffer_size != audio.cava_buffer_size) {
+                pthread_mutex_lock(&audio.lock);
+                audio.cava_buffer_size = plan->input_buffer_size;
+                free(audio.cava_in);
+                audio.cava_in = (double *)malloc(audio.cava_buffer_size * sizeof(double));
+                memset(audio.cava_in, 0, sizeof(double) * audio.cava_buffer_size);
+                pthread_mutex_unlock(&audio.lock);
+            }
+
             bars_left = (float *)malloc(number_of_bars / output_channels * sizeof(float));
             bars_right = (float *)malloc(number_of_bars / output_channels * sizeof(float));
             memset(bars_left, 0, sizeof(float) * number_of_bars / output_channels);
@@ -730,12 +859,14 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
 
             bars = (int *)malloc(number_of_bars * sizeof(int));
             bars_raw = (float *)malloc(number_of_bars * sizeof(float));
+            previous_bars_raw = (float *)malloc(number_of_bars * sizeof(float));
             previous_frame = (int *)malloc(number_of_bars * sizeof(int));
             cava_out = (double *)malloc(number_of_bars * audio.channels / output_channels *
                                         sizeof(double));
 
             memset(bars, 0, sizeof(int) * number_of_bars);
             memset(bars_raw, 0, sizeof(float) * number_of_bars);
+            memset(previous_bars_raw, 0, sizeof(float) * number_of_bars);
             memset(previous_frame, 0, sizeof(int) * number_of_bars);
             memset(cava_out, 0, sizeof(double) * number_of_bars * audio.channels / output_channels);
 
@@ -799,12 +930,12 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
                 framerate_timer.tv_sec = 0;
                 framerate_timer.tv_nsec = frame_time_msec * 1e6;
             }
-#ifdef _MSC_VER
+#ifdef _WIN32
             LARGE_INTEGER frequency; // ticks per second
             LARGE_INTEGER t1, t2;    // ticks
             double elapsedTime;
             QueryPerformanceFrequency(&frequency);
-#endif // _MSC_VER
+#endif // _WIN32
 
             int sleep_counter = 0;
             bool silence = false;
@@ -827,7 +958,7 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
                     ch = getch();
 #endif
 
-#ifndef _MSC_VER
+#ifndef _WIN32
                 if (output_mode == OUTPUT_NONCURSES)
                     read(0, &ch, sizeof(ch));
 #endif
@@ -868,6 +999,32 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
                         p.bgcol = 0;
                     resizeTerminal = true;
                     break;
+                case 'o': // change orientation
+                    if (output_mode == OUTPUT_NCURSES) {
+                        if (p.orientation == ORIENT_BOTTOM) {
+                            p.orientation = ORIENT_RIGHT;
+                        } else if (p.orientation == ORIENT_RIGHT) {
+                            p.orientation = ORIENT_TOP;
+                        } else if (p.orientation == ORIENT_TOP) {
+                            p.orientation = ORIENT_LEFT;
+                        } else {
+                            p.orientation = ORIENT_BOTTOM;
+                        }
+
+                        if (p.orientation == ORIENT_LEFT || p.orientation == ORIENT_RIGHT) {
+                            dimension_bar = &height;
+                            dimension_value = &width;
+                        } else {
+                            dimension_bar = &width;
+                            dimension_value = &height;
+                        }
+                    } else {
+                        p.orientation =
+                            (p.orientation == ORIENT_BOTTOM) ? ORIENT_TOP : ORIENT_BOTTOM;
+                    }
+
+                    resizeTerminal = true;
+                    break;
 
                 case 'q':
                     should_reload = 1;
@@ -886,7 +1043,7 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
                 if (reload_colors) {
                     struct error_s error;
                     error.length = 0;
-                    if (!load_config(configPath, (void *)&p, 1, &error)) {
+                    if (!load_config(configPath, (void *)&p, 1, &error, reload)) {
                         cleanup();
                         fprintf(stderr, "Error loading config. %s", error.message);
                         exit(EXIT_FAILURE);
@@ -897,7 +1054,7 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
 
 #ifndef NDEBUG
                 // clear();
-#ifndef _MSC_VER
+#ifndef _WIN32
                 refresh();
 #endif
 #endif
@@ -911,7 +1068,7 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
                         break;
                     }
                 }
-#ifndef _MSC_VER
+#ifndef _WIN32
 
                 if (output_mode != OUTPUT_SDL) {
                     if (p.sleep_timer) {
@@ -930,7 +1087,7 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
                     }
                 }
 
-#endif // !_MSC_VER
+#endif // !_WIN32
 
                 // process: execute cava
                 pthread_mutex_lock(&audio.lock);
@@ -1112,9 +1269,9 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
                          minvalue); // checking maxvalue 10000
                 mvprintw(number_of_bars + 3, 0, "max value: %d\n",
                          maxvalue); // checking maxvalue 10000
-#ifndef _MSC_VER
+#ifndef _WIN32
                 (void)x_axis_info;
-#endif // !_MSC_VER
+#endif // !_WIN32
 #endif
 
 // output: draw processed input
@@ -1125,7 +1282,7 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
                     printf("\033[2026l\033\\");
                 }
                 int rc;
-#ifdef _MSC_VER
+#ifdef _WIN32
                 QueryPerformanceCounter(&t1);
 #endif
                 switch (output_mode) {
@@ -1139,25 +1296,25 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
 #endif
 #ifdef SDL_GLSL
                 case OUTPUT_SDL_GLSL:
-                    rc = draw_sdl_glsl(number_of_bars, bars_raw, frame_time_msec, re_paint,
-                                       p.continuous_rendering);
+                    rc = draw_sdl_glsl(number_of_bars, bars_raw, previous_bars_raw, frame_time_msec,
+                                       re_paint, p.continuous_rendering);
                     break;
 #endif
                 case OUTPUT_NONCURSES:
                     if (p.orientation == ORIENT_SPLIT_H) {
-                        rc = draw_terminal_noncurses(inAtty, lines, width, number_of_bars,
-                                                     p.bar_width, p.bar_spacing, remainder, bars,
-                                                     previous_frame, p.gradient, x_axis_info,
-                                                     ORIENT_BOTTOM, 1);
-                        rc = draw_terminal_noncurses(inAtty, lines, width, number_of_bars,
-                                                     p.bar_width, p.bar_spacing, remainder, bars,
-                                                     previous_frame, p.gradient, x_axis_info,
-                                                     ORIENT_TOP, 1);
+                        rc = draw_terminal_noncurses(
+                            inAtty, lines, width, number_of_bars, p.bar_width, p.bar_spacing,
+                            remainder, bars, previous_frame, p.gradient, p.horizontal_gradient,
+                            x_axis_info, ORIENT_BOTTOM, 1);
+                        rc = draw_terminal_noncurses(
+                            inAtty, lines, width, number_of_bars, p.bar_width, p.bar_spacing,
+                            remainder, bars, previous_frame, p.gradient, p.horizontal_gradient,
+                            x_axis_info, ORIENT_TOP, 1);
                     } else {
-                        rc = draw_terminal_noncurses(inAtty, lines, width, number_of_bars,
-                                                     p.bar_width, p.bar_spacing, remainder, bars,
-                                                     previous_frame, p.gradient, x_axis_info,
-                                                     p.orientation, 0);
+                        rc = draw_terminal_noncurses(
+                            inAtty, lines, width, number_of_bars, p.bar_width, p.bar_spacing,
+                            remainder, bars, previous_frame, p.gradient, p.horizontal_gradient,
+                            x_axis_info, p.orientation, 0);
                     }
                     break;
                 case OUTPUT_NCURSES:
@@ -1168,17 +1325,24 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
                                                x_axis_info, p.orientation);
                     break;
 #endif
-#ifndef _MSC_VER
                 case OUTPUT_RAW:
+#ifndef _WIN32
                     rc = print_raw_out(number_of_bars, fp, p.raw_format, p.bit_format,
                                        p.ascii_range, p.bar_delim, p.frame_delim, bars);
+#else
+                    rc = print_raw_out(number_of_bars, hFile, p.raw_format, p.bit_format,
+                                       p.ascii_range, p.bar_delim, p.frame_delim, bars);
+#endif
                     break;
                 case OUTPUT_NORITAKE:
+#ifndef _WIN32
                     rc = print_ntk_out(number_of_bars, fp, p.bit_format, p.bar_width, p.bar_spacing,
                                        p.bar_height, bars);
+#else
+                    rc = print_ntk_out(number_of_bars, hFile, p.bit_format, p.bar_width,
+                                       p.bar_spacing, p.bar_height, bars);
+#endif
                     break;
-
-#endif // !_MSC_VER
                 default:
                     exit(EXIT_FAILURE); // Can't happen.
                 }
@@ -1201,6 +1365,9 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
 #endif
 
                 memcpy(previous_frame, bars, number_of_bars * sizeof(int));
+                if (p.output == OUTPUT_SDL_GLSL) {
+                    memcpy(previous_bars_raw, bars_raw, number_of_bars * sizeof(float));
+                }
 
                 // checking if audio thread has exited unexpectedly
                 pthread_mutex_lock(&audio.lock);
@@ -1210,7 +1377,7 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
                     exit(EXIT_FAILURE);
                 }
                 pthread_mutex_unlock(&audio.lock);
-#ifdef _MSC_VER
+#ifdef _WIN32
                 QueryPerformanceCounter(&t2);
                 elapsedTime = (t2.QuadPart - t1.QuadPart) * 1000.0 / frequency.QuadPart;
                 int fps_sync_time = frame_time_msec;
@@ -1222,7 +1389,7 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
                     fps_sync_time = (frame_time_msec - (int)elapsedTime) / 2;
 #endif
                 if (output_mode != OUTPUT_SDL && output_mode != OUTPUT_SDL_GLSL) {
-#ifdef _MSC_VER
+#ifdef _WIN32
                     Sleep(fps_sync_time);
 #else
                     nanosleep(&framerate_timer, NULL);
@@ -1255,6 +1422,7 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
             free(cava_out);
             free(bars);
             free(bars_raw);
+            free(previous_bars_raw);
             free(previous_frame);
         } // reloading config
 
@@ -1270,8 +1438,9 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
         free(audio.source);
         free(audio.cava_in);
         cleanup();
+        reload = 1;
 
-        if (should_quit) {
+        if (should_quit && signal_received == 0) {
             if (p.zero_test && total_bar_height > 0) {
                 fprintf(stderr, "Test mode: expected total bar height to be zero, but was: %d\n",
                         total_bar_height);
@@ -1284,6 +1453,11 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
                 return EXIT_SUCCESS;
             }
         }
+        if (signal_received != 0) {
+            signal(signal_received, SIG_DFL);
+            raise(signal_received);
+        }
         // fclose(fp);
+        // CloseHandle(hFile);
     }
 }

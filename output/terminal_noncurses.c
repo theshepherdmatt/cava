@@ -1,11 +1,11 @@
-#include "output/terminal_noncurses.h"
+#include "terminal_noncurses.h"
 
 #include <locale.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifdef _MSC_VER
+#ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
 #include <windows.h>
@@ -31,7 +31,7 @@ int ttybuf_length;
 
 int setecho(int fd, int onoff) {
 
-#ifdef _MSC_VER
+#ifdef _WIN32
     HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
     DWORD mode = 0;
     GetConsoleMode(hStdin, &mode);
@@ -67,6 +67,8 @@ struct colors {
 };
 
 struct colors *gradient_colors;
+struct colors *horizontal_gradient_colors;
+struct colors *twodim_gradient_colors;
 
 struct colors parse_color(char *color_string) {
     struct colors color;
@@ -85,15 +87,23 @@ void free_terminal_noncurses(void) {
         free(top_barstring[i]);
         free(ttybarstring[i]);
     }
-    free(gradient_colors);
 }
 
 int init_terminal_noncurses(int tty, char *const fg_color_string, char *const bg_color_string,
                             int col, int bgcol, int gradient, int gradient_count,
-                            char **gradient_color_strings, int width, int lines, int bar_width,
-                            enum orientation orientation) {
+                            char **gradient_color_strings, int horizontal_gradient,
+                            int horizontal_gradient_count, char **horizontal_gradient_color_strings,
+                            int number_of_bars, int width, int lines, int bar_width,
+                            enum orientation orientation, enum orientation blendDirection) {
 
     free_terminal_noncurses();
+
+    if (gradient)
+        free(gradient_colors);
+    if (horizontal_gradient)
+        free(horizontal_gradient_colors);
+    if (gradient && horizontal_gradient)
+        free(twodim_gradient_colors);
 
     if (tty) {
 
@@ -160,7 +170,7 @@ int init_terminal_noncurses(int tty, char *const fg_color_string, char *const bg
     }
 
     col += 30;
-#ifdef _MSC_VER
+#ifdef _WIN32
     HANDLE hStdOut = NULL;
     CONSOLE_CURSOR_INFO curInfo;
 
@@ -174,10 +184,8 @@ int init_terminal_noncurses(int tty, char *const fg_color_string, char *const bg
     system("cls");
 
 #else
-#ifndef __FreeBSD__
-    system("setterm -cursor off");
-#endif
-    system("clear");
+    printf("\033[2J");   // clear screen
+    printf("\033[?25l"); // hide cursor
 #endif
 
     // output: reset console
@@ -252,7 +260,77 @@ int init_terminal_noncurses(int tty, char *const fg_color_string, char *const bg
         gradient_colors[lines - 1] = gradient_color_defs[gradient_count - 1];
     }
 
-#ifdef _MSC_VER
+    if (horizontal_gradient) {
+
+        struct colors horizontal_gradient_color_defs[MAX_GRADIENT_COLOR_DEFS];
+        for (int i = 0; i < horizontal_gradient_count; i++) {
+            horizontal_gradient_color_defs[i] = parse_color(horizontal_gradient_color_strings[i]);
+        }
+
+        horizontal_gradient_colors =
+            (struct colors *)malloc((number_of_bars) * sizeof(struct colors));
+
+        int individual_size = number_of_bars / (horizontal_gradient_count - 1);
+
+        float rest = number_of_bars / (float)(horizontal_gradient_count - 1) - individual_size;
+
+        float rest_total = 0;
+
+        int gradient_bars = 0;
+
+        for (int i = 0; i < horizontal_gradient_count - 1; i++) {
+            individual_size = number_of_bars / (horizontal_gradient_count - 1);
+            if (rest_total > 1.0) {
+                individual_size++;
+                rest_total = rest_total - 1.0;
+            }
+            for (int n = 0; n < individual_size; n++) {
+                for (int c = 0; c < 3; c++) {
+                    float next_color = horizontal_gradient_color_defs[i + 1].rgb[c] -
+                                       horizontal_gradient_color_defs[i].rgb[c];
+                    next_color *= n / (float)individual_size;
+                    horizontal_gradient_colors[gradient_bars].rgb[c] =
+                        horizontal_gradient_color_defs[i].rgb[c] + next_color;
+                }
+                gradient_bars++;
+            }
+            rest_total = rest_total + rest;
+        }
+        horizontal_gradient_colors[number_of_bars - 1] =
+            horizontal_gradient_color_defs[horizontal_gradient_count - 1];
+    }
+
+    if (horizontal_gradient && gradient) {
+        twodim_gradient_colors =
+            (struct colors *)malloc((number_of_bars * lines) * sizeof(struct colors));
+        for (int i = 0; i < lines; i++) {
+            float current_height = i / (float)lines;
+            for (int n = 0; n < number_of_bars; n++) {
+                float current_width = n / (float)number_of_bars;
+                for (int c = 0; c < 3; c++) {
+                    if (blendDirection == ORIENT_BOTTOM) {
+                        twodim_gradient_colors[i * number_of_bars + n].rgb[c] =
+                            gradient_colors[i].rgb[c] * current_height +
+                            horizontal_gradient_colors[n].rgb[c] * (1 - current_height);
+                    } else if (blendDirection == ORIENT_TOP) {
+                        twodim_gradient_colors[i * number_of_bars + n].rgb[c] =
+                            gradient_colors[i].rgb[c] * (1 - current_height) +
+                            horizontal_gradient_colors[n].rgb[c] * current_height;
+                    } else if (blendDirection == ORIENT_LEFT) {
+                        twodim_gradient_colors[i * number_of_bars + n].rgb[c] =
+                            gradient_colors[i].rgb[c] * current_width +
+                            horizontal_gradient_colors[n].rgb[c] * (1 - current_width);
+                    } else if (blendDirection == ORIENT_RIGHT) {
+                        twodim_gradient_colors[i * number_of_bars + n].rgb[c] =
+                            gradient_colors[i].rgb[c] * (1 - current_width) +
+                            horizontal_gradient_colors[n].rgb[c] * current_width;
+                    }
+                }
+            }
+        }
+    }
+
+#ifdef _WIN32
     setecho(1, 0);
 #else
     setecho(STDIN_FILENO, 0);
@@ -262,7 +340,7 @@ int init_terminal_noncurses(int tty, char *const fg_color_string, char *const bg
 
 void get_terminal_dim_noncurses(int *width, int *lines) {
 
-#ifdef _MSC_VER
+#ifdef _WIN32
     CONSOLE_SCREEN_BUFFER_INFO csbi;
 
     GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi);
@@ -280,8 +358,8 @@ void get_terminal_dim_noncurses(int *width, int *lines) {
 
 int draw_terminal_noncurses(int tty, int lines, int width, int number_of_bars, int bar_width,
                             int bar_spacing, int rest, int bars[], int previous_frame[],
-                            int gradient, int x_axis_info, enum orientation orientation,
-                            int offset) {
+                            int gradient, int horizontal_gradient, int x_axis_info,
+                            enum orientation orientation, int offset) {
 
     int current_cell, prev_cell, same_line, new_line, cx;
 
@@ -313,15 +391,10 @@ int draw_terminal_noncurses(int tty, int lines, int width, int number_of_bars, i
     if (offset)
         lines /= 2;
 
-    if (orientation == ORIENT_TOP && offset) {
-        cx += swprintf(frame_buffer + cx, buf_length - cx, L"\033[%dB",
-                       lines); // move down
-    }
-
     for (int current_line = lines - 1; current_line >= 0; current_line--) {
 
         if (orientation == ORIENT_BOTTOM) {
-            if (gradient) {
+            if (gradient & !horizontal_gradient) {
                 if (tty) {
                     cx += snprintf(ttyframe_buffer + cx, ttybuf_length - cx, "\033[38;2;%d;%d;%dm",
                                    gradient_colors[current_line].rgb[0],
@@ -335,7 +408,7 @@ int draw_terminal_noncurses(int tty, int lines, int width, int number_of_bars, i
                 }
             }
         } else if (orientation == ORIENT_TOP) {
-            if (gradient) {
+            if (gradient & !horizontal_gradient) {
                 if (tty) {
                     cx += snprintf(ttyframe_buffer + cx, ttybuf_length - cx, "\033[38;2;%d;%d;%dm",
                                    gradient_colors[lines - current_line - 1].rgb[0],
@@ -351,7 +424,7 @@ int draw_terminal_noncurses(int tty, int lines, int width, int number_of_bars, i
         }
 
         int same_bar = 0;
-        int center_adjusted = 0;
+        new_line = 1;
 
         for (int i = 0; i < number_of_bars; i++) {
 
@@ -369,11 +442,28 @@ int draw_terminal_noncurses(int tty, int lines, int width, int number_of_bars, i
                 same_bar++;
             } else {
                 if (tty) {
-                    if (same_line > 0) {
-                        cx += snprintf(ttyframe_buffer + cx, ttybuf_length - cx, "\033[%dB",
-                                       same_line); // move down
-                        new_line += same_line;
-                        same_line = 0;
+                    // move cursor to beginning of this line
+                    if (new_line) {
+                        if (orientation == ORIENT_TOP && offset) {
+                            if (rest || same_bar)
+                                cx += snprintf(ttyframe_buffer + cx, ttybuf_length - cx,
+                                               "\033[%d;%dH", lines * 2 - current_line,
+                                               1 + rest + (bar_width + bar_spacing) * same_bar);
+                            else
+                                cx += snprintf(ttyframe_buffer + cx, ttybuf_length - cx, "\033[%dH",
+                                               lines * 2 - current_line);
+                        } else {
+
+                            if (rest || same_bar)
+                                cx += snprintf(ttyframe_buffer + cx, ttybuf_length - cx,
+                                               "\033[%d;%dH", lines - current_line,
+                                               1 + rest + (bar_width + bar_spacing) * same_bar);
+                            else
+                                cx += snprintf(ttyframe_buffer + cx, ttybuf_length - cx, "\033[%dH",
+                                               lines - current_line);
+                        }
+                        new_line = 0;
+                        same_bar = 0;
                     }
 
                     if (same_bar > 0) {
@@ -382,9 +472,42 @@ int draw_terminal_noncurses(int tty, int lines, int width, int number_of_bars, i
                         same_bar = 0;
                     }
 
-                    if (!center_adjusted && rest) {
-                        cx += snprintf(ttyframe_buffer + cx, ttybuf_length - cx, "\033[%dC", rest);
-                        center_adjusted = 1;
+                    // horizontal gradient
+                    if (current_cell > 0) {
+                        if (!gradient && horizontal_gradient) {
+                            cx += snprintf(ttyframe_buffer + cx, ttybuf_length - cx,
+                                           "\033[38;2;%d;%d;%dm",
+                                           horizontal_gradient_colors[i].rgb[0],
+                                           horizontal_gradient_colors[i].rgb[1],
+                                           horizontal_gradient_colors[i].rgb[2]);
+                        }
+                        if (gradient && horizontal_gradient) {
+                            if (orientation == ORIENT_BOTTOM) {
+                                cx += snprintf(
+                                    ttyframe_buffer + cx, ttybuf_length - cx, "\033[38;2;%d;%d;%dm",
+                                    twodim_gradient_colors[current_line * number_of_bars + i]
+                                        .rgb[0],
+                                    twodim_gradient_colors[current_line * number_of_bars + i]
+                                        .rgb[1],
+                                    twodim_gradient_colors[current_line * number_of_bars + i]
+                                        .rgb[2]);
+                            } else if (orientation == ORIENT_TOP) {
+                                cx += snprintf(ttyframe_buffer + cx, ttybuf_length - cx,
+                                               "\033[38;2;%d;%d;%dm",
+                                               twodim_gradient_colors[(lines - current_line - 1) *
+                                                                          number_of_bars +
+                                                                      i]
+                                                   .rgb[0],
+                                               twodim_gradient_colors[(lines - current_line - 1) *
+                                                                          number_of_bars +
+                                                                      i]
+                                                   .rgb[1],
+                                               twodim_gradient_colors[(lines - current_line - 1) *
+                                                                          number_of_bars +
+                                                                      i]
+                                                   .rgb[2]);
+                            }
+                        }
                     }
 
                     if (current_cell < 1)
@@ -397,15 +520,36 @@ int draw_terminal_noncurses(int tty, int lines, int width, int number_of_bars, i
                         cx += snprintf(ttyframe_buffer + cx, ttybuf_length - cx, "%s",
                                        ttybarstring[current_cell]);
 
-                    if (bar_spacing)
-                        cx += snprintf(ttyframe_buffer + cx, ttybuf_length - cx, "\033[%dC",
-                                       bar_spacing);
+                    if (bar_spacing && i < number_of_bars - 1) {
+                        if (bar_spacing == 1)
+                            cx += snprintf(ttyframe_buffer + cx, ttybuf_length - cx, " ");
+                        else
+                            cx += snprintf(ttyframe_buffer + cx, ttybuf_length - cx, "\033[%dC",
+                                           bar_spacing);
+                    }
                 } else if (!tty) {
-                    if (same_line > 0) {
-                        cx += swprintf(frame_buffer + cx, buf_length - cx, L"\033[%dB",
-                                       same_line); // move down
-                        new_line += same_line;
-                        same_line = 0;
+
+                    // move cursor to beginning of this line
+                    if (new_line) {
+                        if (orientation == ORIENT_TOP && offset) {
+                            if (rest || same_bar)
+                                cx += swprintf(frame_buffer + cx, buf_length - cx, L"\033[%d;%dH",
+                                               lines * 2 - current_line,
+                                               1 + rest + (bar_width + bar_spacing) * same_bar);
+                            else
+                                cx += swprintf(frame_buffer + cx, buf_length - cx, L"\033[%dH",
+                                               lines * 2 - current_line);
+                        } else {
+                            if (rest || same_bar)
+                                cx += swprintf(frame_buffer + cx, buf_length - cx, L"\033[%d;%dH",
+                                               lines - current_line,
+                                               1 + rest + (bar_width + bar_spacing) * same_bar);
+                            else
+                                cx += swprintf(frame_buffer + cx, buf_length - cx, L"\033[%dH",
+                                               lines - current_line);
+                        }
+                        new_line = 0;
+                        same_bar = 0;
                     }
 
                     if (same_bar > 0) {
@@ -414,56 +558,84 @@ int draw_terminal_noncurses(int tty, int lines, int width, int number_of_bars, i
                         same_bar = 0;
                     }
 
-                    if (!center_adjusted && rest) {
-                        cx += swprintf(frame_buffer + cx, buf_length - cx, L"\033[%dC", rest);
-                        center_adjusted = 1;
+                    // horizontal gradient
+                    if (current_cell > 0) {
+                        if (!gradient && horizontal_gradient) {
+                            cx +=
+                                swprintf(frame_buffer + cx, buf_length - cx, L"\033[38;2;%d;%d;%dm",
+                                         horizontal_gradient_colors[i].rgb[0],
+                                         horizontal_gradient_colors[i].rgb[1],
+                                         horizontal_gradient_colors[i].rgb[2]);
+                        }
+
+                        if (gradient && horizontal_gradient) {
+                            if (orientation == ORIENT_BOTTOM) {
+                                cx += swprintf(
+                                    frame_buffer + cx, buf_length - cx, L"\033[38;2;%d;%d;%dm",
+                                    twodim_gradient_colors[current_line * number_of_bars + i]
+                                        .rgb[0],
+                                    twodim_gradient_colors[current_line * number_of_bars + i]
+                                        .rgb[1],
+                                    twodim_gradient_colors[current_line * number_of_bars + i]
+                                        .rgb[2]);
+                            } else if (orientation == ORIENT_TOP) {
+                                cx += swprintf(frame_buffer + cx, buf_length - cx,
+                                               L"\033[38;2;%d;%d;%dm",
+                                               twodim_gradient_colors[(lines - current_line - 1) *
+                                                                          number_of_bars +
+                                                                      i]
+                                                   .rgb[0],
+                                               twodim_gradient_colors[(lines - current_line - 1) *
+                                                                          number_of_bars +
+                                                                      i]
+                                                   .rgb[1],
+                                               twodim_gradient_colors[(lines - current_line - 1) *
+                                                                          number_of_bars +
+                                                                      i]
+                                                   .rgb[2]);
+                            }
+                        }
                     }
 
                     if (current_cell < 1) {
-                        cx += swprintf(frame_buffer + cx, buf_length - cx, spacestring);
+                        cx += swprintf(frame_buffer + cx, buf_length - cx, spacestring); // clear
                     } else if (current_cell > 7) {
                         if (orientation == ORIENT_BOTTOM)
-                            cx += swprintf(frame_buffer + cx, buf_length - cx, barstring[0]);
+                            cx += swprintf(frame_buffer + cx, buf_length - cx,
+                                           barstring[0]); // draw full
                         else if (orientation == ORIENT_TOP)
-                            cx += swprintf(frame_buffer + cx, buf_length - cx, top_barstring[0]);
+                            cx += swprintf(frame_buffer + cx, buf_length - cx,
+                                           top_barstring[0]); // draw fragment (top)
                     } else {
                         if (orientation == ORIENT_BOTTOM)
                             cx += swprintf(frame_buffer + cx, buf_length - cx,
-                                           barstring[current_cell]);
+                                           barstring[current_cell]); // draw fragment
                         else if (orientation == ORIENT_TOP)
                             cx += swprintf(frame_buffer + cx, buf_length - cx,
-                                           top_barstring[current_cell]);
+                                           top_barstring[current_cell]); // draw fragment (top)
                     }
 
-                    if (bar_spacing)
-                        cx +=
-                            swprintf(frame_buffer + cx, buf_length - cx, L"\033[%dC", bar_spacing);
+                    if (bar_spacing && i < number_of_bars - 1) {
+                        if (bar_spacing == 1)
+                            cx += swprintf(frame_buffer + cx, buf_length - cx, L" ");
+                        else
+                            cx += swprintf(frame_buffer + cx, buf_length - cx, L"\033[%dC",
+                                           bar_spacing);
+                    }
                 }
             }
         }
 
-        if (same_bar != number_of_bars) {
-            if (current_line != 0) {
-                if (tty)
-                    cx += snprintf(ttyframe_buffer + cx, ttybuf_length - cx, "\n");
-                else if (!tty)
-                    cx += swprintf(frame_buffer + cx, buf_length - cx, L"\n");
-
-                new_line++;
-            }
-        } else {
+        if (same_bar == number_of_bars) {
             same_line++;
         }
     }
-    if (orientation == ORIENT_TOP && offset) {
-        cx += swprintf(frame_buffer + cx, buf_length - cx, L"\033[%dA",
-                       lines); // move up
-    }
+
     if (same_line != lines) {
         if (tty)
-            printf("%s\r\033[%dA", ttyframe_buffer, new_line);
+            printf("%s", ttyframe_buffer);
         else if (!tty)
-            printf("%ls\r\033[%dA", frame_buffer, new_line);
+            printf("%ls", frame_buffer);
 
         fflush(stdout);
     }
@@ -471,7 +643,7 @@ int draw_terminal_noncurses(int tty, int lines, int width, int number_of_bars, i
 }
 
 void cleanup_terminal_noncurses(void) {
-#ifdef _MSC_VER
+#ifdef _WIN32
     setecho(1, 1);
     HANDLE hStdOut = NULL;
     CONSOLE_CURSOR_INFO curInfo;
@@ -480,6 +652,7 @@ void cleanup_terminal_noncurses(void) {
     GetConsoleCursorInfo(hStdOut, &curInfo);
     curInfo.bVisible = TRUE;
     SetConsoleCursorInfo(hStdOut, &curInfo);
+    printf("\033[0m\n");
     system("cls");
 #else
     setecho(STDIN_FILENO, 1);
@@ -488,9 +661,12 @@ void cleanup_terminal_noncurses(void) {
 #else
     system("setfont  >/dev/null 2>&1");
     system("setfont /usr/share/consolefonts/Lat2-Fixed16.psf.gz  >/dev/null 2>&1");
-    system("setterm -cursor on");
 #endif
-    system("clear");
+    printf("\033[0m\n"); // reset colors
+    printf("\033[?25h"); // show cursor
+    printf("\033c");     // reset terminal
+    printf("\033[2J");   // clear screen
+    fflush(stdout);
+
 #endif
-    printf("\033[0m\n");
 }
